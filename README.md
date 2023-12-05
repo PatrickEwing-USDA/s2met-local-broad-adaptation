@@ -1,5 +1,5 @@
 # Local adaptation and broad performance are synergistic to productivity in modern barley
-Data and analysis for Ewing et al., *in review*.
+Data and analysis for Ewing et al., 2024. Local adaptation and broad performance are synergistic to productivity in modern barley. *Crop Science*.
 
 **Files**
 
