@@ -1,0 +1,833 @@
+---
+title: "HFA of S2MET"
+output: html_notebook
+---
+
+Calculate home field advantage of S2MET barley lines. Make HFA vs yield
+figure.
+
+# Load
+```{r}
+libs = c(
+  'here',
+  'magrittr',
+  'ggplot2',
+  'lme4',
+  'car',
+  'emmeans',
+  'multcomp',
+  'wesanderson',
+  'gridExtra'
+)
+
+for (i in libs) {
+  if (!require(i, character.only=TRUE)) {
+    install.packages(i)
+    library(i, character.only=TRUE)
+  }
+}
+
+sapply(libs, function(x) as.character(packageVersion(x))) %>% 
+  as.matrix
+
+colors=wes_palette('Darjeeling1')
+colors[3] = '#777777'  #replace the light yellow with a medium gray
+colors = colors[c(1, 2, 4, 5, 3)]
+```
+
+```{r}
+in_hfa = "R HFA" %>% 
+  here('R', .) %>% 
+  list.files(full.names=TRUE, recursive=TRUE)
+for (i in in_hfa) source(i)
+```
+
+
+
+```{r}
+in_dir = "Data"
+in_df = "S2MET_BLUP.csv"
+out_dir = 'Results'
+also_factors = c('YEAR')
+keep_expt = 'S2MET'
+
+# Drop checks as they are chosen for . 
+checks = c('2ND25276',
+           'AAC_SYNERGY',
+           'AC_METCALFE',
+           'CDC_COPELAND',
+           'CONLON',
+           'CONRAD',
+           'HOCKETT',
+           'LCS_GENIE',
+           'PINNACLE')
+
+df = here(in_dir, in_df) %>%
+  read.csv
+
+df[, also_factors] %<>% as.character
+```
+
+
+```{r}
+df$EXPT = strsplit(df$STUDY_ID, '_') %>% 
+  sapply('[', 1)
+
+train_lines = subset(df, EXPT==keep_expt) %>% 
+  .[, 'ENTRY'] %>% 
+  unique %>% 
+  .[!grepl('MS', .)]
+
+df %<>% subset(ENTRY %in% train_lines) %>% 
+  subset(ENTRY != 'BLANK') %>% 
+  subset(!(ENTRY %in% checks)) %>%
+  droplevels
+
+```
+
+## Check data
+Unique entries:
+```{r}
+length(unique(df$ENTRY))
+```
+As expected
+
+Site-years:
+```{r}
+siteyears = df[, c('STUDY_ID', 'ENTRY')] %>% 
+  unique
+tapply(siteyears$STUDY_ID, siteyears$ENTRY, length) %>% 
+  tapply(., ., length)
+```
+All were present in multiple siteyears (at least 19). 
+
+```{r}
+tapply(df$STUDY_ID, df$ENTRY, length) %>% 
+  sort %>% head
+```
+
+
+### Assign programs.
+```{r}
+programs = c(
+  AB = 'ABR',
+  WA = 'WSU',
+  ND = 'NDSU',
+  MT = 'MSU',
+  WNZ = 'WSU',
+  N2 = 'NDSU',
+  `2B` = 'BARI'
+)  # with BARI everything else, probably
+
+df$PROGRAM = NA
+for (i in names(programs)) {
+  df[grepl(i, df$ENTRY), 'PROGRAM'] = programs[i]
+}
+
+is_check = df$ENTRY %in% checks
+df = df[!is_check, ]
+
+df$PROGRAM %<>% as.factor
+
+df[, c('PROGRAM', 'ENTRY')] %>% 
+  unique %>% 
+  summary
+```
+
+Drop BARI, which only has one entry 
+```{r}
+df %<>% subset(PROGRAM != 'BARI') %>% 
+  droplevels
+```
+
+
+
+```{r}
+tt = df
+tt[, sapply(tt, is.character)] %<>% lapply(factor)
+summary(tt)
+```
+
+### Contingency tables of sample units
+Entries at each site-year
+```{r}
+with(tt, table(SITE, YEAR))
+```
+Due to unbalanced (and low) representation of some sites we want to use shrinkage
+to ID home sites. 
+
+Also, we will only keep sites with multiple siteyears with basically the full study.
+
+```{r}
+is_single = with(df, table(SITE, YEAR)) %>% 
+  {. > 100} %>% 
+  rowSums %>% 
+  .[.<2] %>% 
+  names
+
+df %<>% 
+  subset(!(SITE %in% is_single)) %>% 
+  droplevels
+
+with(df, table(SITE, YEAR))
+```
+```{r}
+unique(df[, c('SITE', 'YEAR')]) %>% 
+  nrow
+```
+```{r}
+unique(df[, 'ENTRY']) %>% 
+  length
+```
+
+
+
+```{r}
+with(df, table(YEAR, EXPT))
+
+```
+
+# Evidence of specialization: rank changes across sites
+```{r}
+ranks = split(df, df$STUDY_ID) %>% 
+  lapply(function(x) {x$RANK = order(x$YIELD_ADJ); x}) %>% 
+  do.call(rbind, .)
+```
+
+## Rank change across sites
+```{r}
+rankchange = aggregate(RANK ~ ENTRY, ranks, function(x) diff(range(x)))
+
+rankhist = ggplot(rankchange,
+       aes(x=RANK)) + 
+  geom_histogram(#aes(y=..density..),
+                 fill='#666666',
+                 color='#999999',
+                 size=0.1) +
+  geom_vline(aes(xintercept=median(RANK)),
+             linetype='dashed',
+             color='tomato2',
+             size=0.5) +
+  # geom_density(color='tomato3',
+  #              size=1) +
+  labs(x='Rank Change',
+       y='Number of Entries') +
+  theme(panel.background=element_blank())
+
+rankhist
+```
+
+How many lines are in top 10% and bottom 10%?
+```{r}
+cutoff = 0.10
+
+n_entries = nrow(rankchange)
+cutoff = n_entries*(1-cutoff)
+
+n_bestworst = sum(rankchange$RANK > cutoff)
+n_bestworst
+```
+
+
+```{r}
+n_bestworst/n_entries
+
+```
+
+
+# Rank Caterpillars
+```{r}
+quantrange = function(x, e=0.5, q=0.5) {
+  x %<>% na.omit
+  q = 1-q
+  qlow = q/2
+  qhi = 1-qlow
+  out = data.frame(
+    y = quantile(x, e),
+    ymin = quantile(x, qlow),
+    ymax = quantile(x, qhi)
+  )
+  return(out)
+}
+
+program_order = c('ABR',
+                  'MSU',
+                  'NDSU',
+                  'WSU')
+entry_order = aggregate(RANK ~ ENTRY + PROGRAM, data=ranks, median) %>% 
+  split(., .[, 'PROGRAM']) %>% 
+  lapply(function(x) x[order(x$RANK, decreasing=FALSE), ]) %>% 
+  .[program_order[5:1]] %>% 
+  do.call(rbind, .) %>% 
+  .[, 'ENTRY']
+
+ranks$ENTRY %<>% factor(levels=entry_order)
+ranks$PROGRAM %<>% factor(levels=program_order)
+
+rankcat = ggplot(ranks,
+       aes(y=RANK,
+           x=ENTRY,
+           color=PROGRAM)) +
+  coord_flip() +
+  scale_color_manual(values=colors) +
+  stat_summary(fun.data=quantrange,
+               geom='pointrange',
+               fun.args=list(q=0.9),
+               size=0.1) +
+  stat_summary(fun.data=quantrange,
+               geom='pointrange',
+               fun.args=list(q=0.5),
+               size=0.5,
+               fatten=0.5,
+               alpha=0.5) +
+  labs(x=NULL,
+       y='Rank Distribution',
+       color='Breeding\nProgram') +
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        panel.background=element_blank(),
+        legend.key=element_blank())
+
+rankcat
+```
+
+# HFA
+## Homes
+Compare shrinkage vs direct estimates. 
+```{r}
+tt_blup = id_home(df,                   
+             'SITE',
+             'YEAR',
+             'ENTRY',
+             'YIELD_ADJ',
+             blup=TRUE)
+bluphome = subset(tt_blup, is_home)
+```
+
+```{r}
+tt_lm = id_home(df,                   
+             'SITE',
+             'YEAR',
+             'ENTRY',
+             'YIELD_ADJ',
+             blup=FALSE)
+lmhome = subset(tt_lm, is_home)
+```
+
+```{r}
+cols = c('ENTRY', 'SITE', 'YEAR')
+tt = merge(bluphome[, cols], lmhome[, cols], by=c('ENTRY', 'YEAR'))
+tt$YEAR = NULL
+tt %<>%
+  unique %>% 
+  set_colnames(c('ENTRY', 'BLUP_HOME', 'LM_HOME'))
+is_different = with(tt, BLUP_HOME != LM_HOME)
+
+tt[is_different, ]
+```
+No disagreements
+
+## Population level HFA
+```{r, warning=FALSE, message=FALSE}
+hfa_pop = permute_hfa(df, 
+                  level='population', 
+                  'SITE',
+                  'YEAR',
+                  'ENTRY',
+                  'YIELD_ADJ',
+                  times=999, 
+                  blup_home=FALSE,
+                  parallel=FALSE)
+hfa_pop
+```
+Pretty small HFA relative to expected. We see evidence for generalization in this population.
+
+# Genotype HFA
+```{r, warning=FALSE, message=FALSE}
+blup_home = FALSE
+
+hfa = permute_hfa(df, 
+                  level='genotype', 
+                  'SITE',
+                  'YEAR',
+                  'ENTRY',
+                  'YIELD_ADJ',
+                  times=999, 
+                  blup_home=blup_home,
+                  parallel=FALSE)
+```
+
+
+```{r}
+.specialist_test = function(x) {
+  nc = ncol(x)
+  obs = x[,1]
+  pr = sweep(x, 1, obs, '>=')
+  out = rowSums(pr)/nc
+  out
+}
+.generalist_test = function(x) {
+  nc = ncol(x)
+  obs = x[,1]
+  pr = sweep(x, 1, obs, '<')
+  out = rowSums(pr)/nc
+  out
+}
+.rowQuantiles = function(x, q) {
+  apply(x, 1, quantile, q)
+} 
+
+tt = hfa$perms[[1]]
+
+ghfa = tt %>% 
+  {
+    data.frame(ENTRY = rownames(.),
+               HFA=.[ ,'observed'],
+               q025 = .rowQuantiles(., 0.025),
+               q095 = .rowQuantiles(., 0.975), 
+               p_specialist = .specialist_test(.),
+               p_generalist = .generalist_test(.))
+    } %>% 
+  set_rownames(NULL)
+ghfa$p_val = apply(ghfa[, c('p_specialist', 'p_generalist')], 1, min)
+ghfa$p_adj = p.adjust(ghfa$p_val, method='fdr')
+
+strategies = c('Generalist', 'Specialist')
+ghfa$strategy = apply(ghfa[, c('p_specialist', 'p_generalist')], 
+                      1, 
+                      function(x) ifelse(x[1] < x[2], 
+                                         strategies[2], 
+                                         strategies[1])) %>% 
+  factor(levels=strategies)
+
+```
+
+
+Calculate expected yield at away (non-home) sites
+```{r}
+df %<>% id_home('SITE', 'YEAR', 'ENTRY', 'YIELD_ADJ', blup=TRUE) 
+away_yield = subset(df, !is_home) %>% 
+  aggregate(YIELD_ADJ ~ ENTRY, ., mean) %>% 
+  set_colnames(c('ENTRY', 'AWAY_YIELD_ADJ'))
+
+ghfa %<>% merge(away_yield, by='ENTRY')
+```
+
+
+Calculate expected yield of each entry
+```{r}
+eyield = aggregate(YIELD_ADJ ~ ENTRY, data=df, mean)
+
+ghfa %<>% merge(eyield, by='ENTRY')
+ghfa %<>% merge(unique(df[, c('ENTRY', 'PROGRAM')]), by='ENTRY')
+```
+
+
+```{r}
+subset(ghfa, p_val < 0.1)
+```
+
+```{r}
+mean_hfa = c(
+  mean = mean(ghfa$HFA),
+  se = sd(ghfa$HFA)/sqrt(nrow(ghfa)),
+  range = diff(range(ghfa$HFA))
+)
+mean_hfa
+
+
+```
+
+## Variance within breeding program?
+```{r}
+pltdf = ghfa
+
+pltdf[, c('HFA', 'YIELD_ADJ', 'AWAY_YIELD_ADJ')] %<>% lapply(scale)
+
+pltdf %<>% merge(
+  subset(df, is_home, select=c('ENTRY', 'SITE')) %>% unique,
+  by='ENTRY'
+)
+
+strategies = c('No\nStrategy', 'Specialist or\nGeneralist')
+pltdf$strategy = ifelse(pltdf$p_val < 0.1, 
+                        strategies[2], 
+                        strategies[1]) %>% 
+  factor(levels=strategies)
+```
+
+
+```{r}
+mm1 = lm(HFA ~ YIELD_ADJ*PROGRAM, data=pltdf)
+mm2 = lm(HFA ~ poly(YIELD_ADJ, 2)*PROGRAM, data=pltdf)
+anova(mm1, mm2)
+mm = mm1
+par(mfrow=c(2,2)); plot(mm); par(mfrow=c(1,1))
+```
+
+Ugly. 
+```{r}
+car::Anova(mm, test.statistic='F')
+```
+No interaction. No program effect. 
+
+### Specialization within breeding program?
+```{r}
+mm = lm(HFA ~ PROGRAM, data=pltdf)
+par(mfrow=c(2,2)); plot(mm); par(mfrow=c(1,1))
+```
+
+```{r}
+plot(emmeans(mm, 'PROGRAM')) +
+  labs(x = "Relative HFA [stdev]") +
+  theme_minimal()
+```
+
+### Yield within breedinf program
+```{r}
+mm = lm(YIELD_ADJ ~ PROGRAM, data=pltdf)
+par(mfrow=c(2,2)); plot(mm); par(mfrow=c(1,1))
+```
+```{r}
+car::Anova(mm, test.statistic='F')
+```
+```{r}
+plot(emmeans(mm, 'PROGRAM')) +
+  labs(x = "Relative Yield [stdev]") +
+  theme_minimal()
+```
+Different programs have different expected yields, but do not specialize. 
+
+## Tradeoff yield vs hfa?
+```{r}
+mod = lm(HFA ~ YIELD_ADJ*PROGRAM, data=pltdf)
+p_val = 
+  Anova(mod) %T>%
+  print %>% 
+  .[1,4]
+```
+
+```{r}
+summary(mod)
+```
+
+
+
+### Figure 3 - Plot and export
+```{r fig.height=5, fig.width=6}
+# pltdf = here(out_dir, 'S2MET HFA vs BLUP.csv') %>%
+#   read.csv
+# pltdf$strategy %<>% 
+#   factor(levels=c('No Strategy', 
+#                   'Specialist or\nGeneralist'))
+
+centers_x = aggregate(YIELD_ADJ ~ PROGRAM, pltdf, function(x) {
+  c(mean(x),
+    mean(x) + sd(x),#/sqrt(length(x)),
+    mean(x) - sd(x))#/sqrt(length(x)))
+}) %>%
+  lapply(unlist) %>% 
+  as.data.frame %>% 
+  set_names(c(
+    'PROGRAM',
+     paste0('YIELD_ADJ', c('', 'HIGH', 'LOW'))))
+
+centers_y = aggregate(HFA ~ PROGRAM, pltdf, function(x) {
+  c(mean(x),
+    mean(x) + sd(x),#/sqrt(length(x)),
+    mean(x) - sd(x))#/sqrt(length(x)))
+}) %>% 
+  lapply(unlist) %>% 
+  as.data.frame %>% 
+  set_names(c(
+    'PROGRAM',
+     paste0('HFA', c('', 'HIGH', 'LOW'))))
+
+centers = merge(centers_x, centers_y, by='PROGRAM')
+```
+
+
+```{r fig.height=5, fig.width=6}
+labeler = paste('italic(y)==', 
+                round(coef(mod)[2], 3), '~italic(x)+',
+                round(coef(mod)[1], 3))
+
+p_label = round(p_val, 3)
+p_label %<>% 
+  {. < 0.001} %>% 
+  ifelse(paste0('italic(p)<', 0.001), 
+         paste0('italic(p)==', p_label))
+
+hfavblup = pltdf %>% 
+  ggplot(aes(x=YIELD_ADJ,
+             y=HFA)) +
+  scale_color_manual(values=colors) +
+  scale_alpha_manual(values=c(0.2, 1)) +
+  geom_hline(aes(yintercept=0),
+             color='lightgray',
+             size=0.1) +
+  geom_vline(aes(xintercept=0),
+             color='lightgray',
+             size=0.1) +
+    geom_abline(aes(slope=coef(mod)['YIELD_ADJ'],
+                  intercept=coef(mod)[1]),
+              color='black',
+              size=0.1) +
+  geom_point(aes(color=PROGRAM, 
+                 alpha=strategy),
+             size=0.5) +
+  geom_point(data=centers,
+             aes(color=PROGRAM),
+             size=1,
+             shape=19) +
+  geom_errorbar(data=centers,
+                aes(ymin=HFALOW,
+                    ymax=HFAHIGH,
+                    color=PROGRAM),
+                width=0,
+                size=0.1) +
+  geom_errorbarh(data=centers,
+                 aes(xmin=YIELD_ADJLOW,
+                     xmax=YIELD_ADJHIGH,
+                     color=PROGRAM),
+                 height=0,
+                 size=0.1) +
+  annotate(geom='text',
+           x=-2.2,
+           y=2.8,
+           label=labeler,
+           parse=TRUE,
+           size=2) +
+  annotate(geom='text',
+           x=-2.2,
+           y=2.5,
+           label=p_label,
+           parse=TRUE,
+           size=2) +
+  labs(x='Standardized Yield Potential',
+       y='Standardized Home Field Advantage',
+       color=NULL,
+       alpha=NULL,
+       title='High yielding lines are more specialist') +
+  theme(panel.background=element_blank(),
+        legend.key=element_blank(),
+        text=element_text(size=10))
+hfavblup
+```
+
+```{r}
+here(out_dir, 'S2MET HFA vs BLUP.csv') %>% 
+  write.csv(pltdf, ., row.names=FALSE)
+```
+
+
+```{r}
+here(out_dir, 'FIGURE - HFA vs BLUP.jpg') %>% 
+  ggsave(hfavblup + labs(title=NULL) + theme(text=element_text(size=8)),
+         height=3.25,
+         width=4,
+         units='in')
+```
+
+Sample sizes:
+```{r}
+summary(pltdf$PROGRAM)
+```
+## Relationship with away yield
+```{r}
+mm = lm(HFA ~ AWAY_YIELD_ADJ * PROGRAM, data=pltdf)
+Anova(mm)
+```
+No overall effect, so again no inherent tradeoff. We do see differences among programs
+
+```{r}
+emtrends(mm, 'PROGRAM', var='AWAY_YIELD_ADJ')
+```
+
+
+## Arrows Plot 
+```{r fig.height=4.5, fig.width=6.5}
+pltdf2 = subset(ghfa, p_val < 0.1)
+pltdf2$NET = with(pltdf2, YIELD_ADJ + HFA)
+
+pltdf2$ENTRY %<>% factor(levels=.[order(pltdf2$YIELD_ADJ, decreasing=TRUE)])
+pltdf2$strategy %<>% factor(levels=c('Specialist', 'Generalist'))
+
+arrows_plot = 
+  ggplot(subset(pltdf2, p_val < 0.1),# & strategy=='Specialist'),
+         aes(y=ENTRY,
+             x=YIELD_ADJ,
+             xend=NET,
+             color=PROGRAM)) +
+  facet_wrap(~strategy,
+             scales='free_y') +
+  scale_color_manual(values=colors) +
+  geom_segment(aes(yend=ENTRY),
+               arrow=arrow(length=unit(0.05, 'inches')),
+               size=0.1) +
+  geom_point(shape=18,
+             size=1) +
+  labs(x='Yield Potential and HFA [kg/ha]', 
+       y=NULL,
+       color=NULL,
+       title=NULL) +
+  theme(panel.background=element_blank(),
+        legend.key=element_blank(),
+        legend.position='bottom',
+        strip.background=element_blank(),
+        legend.box.margin=margin(0, 0, 0, 0),
+        text=element_text(size=8))
+
+arrows_plot
+```
+
+```{r}
+hfa_entry = '2ND23164'
+
+max_hfa_site = subset(df, ENTRY==hfa_entry & is_home)[, c('SITE')] %>% 
+  as.character
+
+max_hfa_g = subset(pltdf2, ENTRY==hfa_entry)[, 'YIELD_ADJ']
+mean_g = mean(pltdf2$YIELD_ADJ)
+```
+
+The example specialist
+```{r}
+hfa_entry
+```
+Has an HFA of:
+```{r}
+hfa$perms[[1]][hfa_entry, 1]
+```
+and is a specialist at confidence:
+```{r}
+subset(pltdf2, ENTRY==hfa_entry)[, 'p_val']
+```
+It's home site:
+```{r}
+max_hfa_site %>% 
+  unique
+```
+It's yield, as a percentage of average:
+```{r}
+(max_hfa_g - mean_g)/mean_g*100
+```
+
+And it's rank at home:
+```{r}
+subset(ranks, ENTRY==as.character(hfa_entry) & SITE==as.character(max_hfa_site))[, c('YEAR', 'RANK')]
+```
+
+# Figure 2
+```{r fig.height=3, fig.width=6.5}
+p1 = rankhist +
+  labs(tag='a)') +
+  theme(text=element_text(size=8))
+p2 = rankcat +
+  labs(tag='b)') +
+  theme(text=element_text(size=8),
+        legend.position='none')
+p3 = arrows_plot +
+  # facet_wrap(~strategy, scales='free_x') +
+  # coord_flip() +
+  labs(tag='c)') +
+  theme(text=element_text(size=8),
+        axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        legend.position='none')
+legend = rankcat +
+  guides(color=guide_legend(nrow=2,
+                            title.position='top',
+                            title.hjust=0.5)) +
+  labs(color='Breeding Program') +
+  theme(legend.position='bottom',
+        text=element_text(size=8))
+legend %<>% ggplot_build %>% 
+  ggplot_gtable %>% 
+  .[['grobs']] %>% 
+  .[[15]]
+```
+
+
+```{r fig.height=3, fig.width=6.5}
+draw_fig2 = function() {
+  grid.arrange(grobs=list(p1, p2, p3, legend), 
+               layout_matrix=matrix(c(1,1,2,2,3,3,3,
+                                      1,1,2,2,3,3,3,
+                                      4,4,2,2,3,3,3),
+                                    nrow=3,
+                                    byrow=TRUE))  
+}
+
+draw_fig2()
+
+```
+
+
+```{r}
+here(out_dir, 'FIGURE 2 - Local Adaptation.jpg') %>% 
+  jpeg(height=3, width=6.5, units='in', res=300)
+draw_fig2()
+dev.off()
+
+here(out_dir, 'Arrows Plot.RData') %>% 
+  save(arrows_plot, file=.)
+```
+
+
+
+# TPE Category
+TPEs are from Jeff Neyhart.
+```{r}
+breeding_tpe = list(
+  ABR = c('Aberdeen, ID', 'Bozeman, MT'),
+  MSU = c('Aberdeen, ID', 'Bozeman, MT'),
+  NDSU = c('Crookston, MN', 'Fargo, ND', 'Saint Paul, MN'),
+  WSU = c('Aberdeen, ID', 'Bozeman, MT')
+)
+```
+
+## TPE Advantage
+A reviewer asked if lines performed better in the locations for which they were bred,
+which is a good counterfactual for HFA. We will run this with TPEs, which are more
+representative of states.
+```{r}
+df$IS_TPE = breeding_tpe[df$PROGRAM]
+df$IS_TPE = apply(df[, c('LOCATION', 'IS_TPE')], 
+                  1, 
+                  function(x) grepl(x['LOCATION'], x['IS_TPE']))
+
+tpe_mod = lm(YIELD_ADJ ~ ENTRY*LOCATION*YEAR + IS_TPE, data=df)
+anova(tpe_mod)
+
+```
+```{r}
+summary(tpe_mod)$coefficients['IS_TPETRUE', ] %>% 
+  round(3)
+
+```
+
+# Correpsondence of Home with TPE
+Jeff was wondering if home sites of specialists correspond to the target population environment (TPE). He provided TPEs for each program.
+We would expect this proportion of home sites to be TPEs:
+```{r}
+n_sites = length(unique(df$LOCATION))
+sapply(breeding_tpe, function(x) length(x)/n_sites)
+```
+And we see:
+```{r}
+home_sites = subset(df, is_home & YEAR == 2016) %>% 
+  .[, c('ENTRY', 'PROGRAM', 'LOCATION')] %>% 
+  merge(ghfa[, c('ENTRY', 'HFA', 'p_val', 'strategy')])
+
+home_sites$IS_TPE = apply(home_sites, 1, function(x) {
+  x['LOCATION'] %in% breeding_tpe[[x['PROGRAM']]]
+})
+
+```
+
+```{r}
+subset(home_sites, strategy=='Specialist' & p_val <= 0.1)
+```
+50% of NDSU home sites are within the TPE, specifically in St. Paul. The rest are at West Lafayette (and one in Aberdeen). 

@@ -1,0 +1,217 @@
+---
+title: "HFA vs BLUP S2MET Weather"
+output: html_notebook
+---
+
+
+Weather data to demonstrate range of conditions at sites.
+
+```{r}
+libs = c(
+  'here',
+  'magrittr',
+  'ggplot2',
+  'tools',
+  'tidyr',
+  'ggtext'
+)
+
+for (i in libs) {
+  if (!require(i, character.only=TRUE)) {
+    install.packages(i)
+    libraray(i, character.only=TRUE)
+  }
+}
+```
+
+```{r}
+in_dir = 'Data'
+in_df = 's2met_daymet_rawDailyWeather.csv'
+
+```
+
+```{r}
+df = here(in_dir,
+          in_df) %>% 
+  read.csv
+```
+
+
+## Wrangle
+```{r}
+is_date = c('planting_date',
+            'harvest_date')
+df[, is_date] %<>% lapply(as.POSIXct)
+```
+
+
+Only keep dates between April 1 and August 1, the "growing season". And only keep 2016-2017.
+```{r}
+df$planting_doy = paste0(df$year, '-04-01')%>% 
+  as.POSIXct %>% 
+  strftime(format='%j') %>% 
+  as.numeric
+df$harvest_doy = paste0(df$year, '-08-01') %>% 
+  as.POSIXct %>% 
+  strftime(format='%j') %>% 
+  as.numeric
+
+is_season = with(df, yday >= planting_doy & yday < harvest_doy)
+df %<>% .[is_season, ]
+
+df %<>% subset(year %in% c(2016, 2017)) %>% 
+  droplevels
+```
+
+Remove sites only present one year
+```{r}
+single_sites = unique(df[, c('location', 'year')]) %>% 
+  with(table(location, year)) %>% 
+  rowSums %>% 
+  .[.<2] %>% 
+  names
+
+df %<>% subset(!(location %in% single_sites)) %>% 
+  droplevels
+```
+
+Year as factor
+```{r}
+df$year %<>% as.factor
+```
+
+
+# Calculate GDD
+Base 4C, max = infinite
+```{r}
+calc_gdd = function(x, low, high, base=4, cutoff=Inf) {
+  low = x[, low]
+  high = x[, high]
+  low[low < base] = base
+  high[high > cutoff] = cutoff
+  
+  gdd = cbind(low, high) %>% 
+    rowMeans %>% 
+    subtract(base) %>% 
+    sapply(max, 0)
+  gdd
+}
+
+gdd = split(df, df$environment) %>% 
+  lapply(function(x) {
+    x$gdd = calc_gdd(x, 'tmin', 'tmax')
+    x
+  }) %>% 
+  do.call(rbind, .) %>% 
+  aggregate(gdd ~ trial + location + year, data=., sum)
+head(gdd)
+```
+
+```{r}
+ggplot(gdd, 
+       aes(x=location, 
+           y=gdd,
+           color=year)) + 
+  geom_point() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+# Solar Radiation
+
+```{r}
+insolation = df %>% 
+  aggregate(radn ~ trial + location + year, data=., sum)
+```
+
+```{r}
+ggplot(insolation, 
+       aes(x=location, 
+           y=radn,
+           color=year)) + 
+  geom_point() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+# Precip
+```{r}
+precip = df %>% 
+  aggregate(prcp ~ trial + location + year, data=., sum)
+```
+
+```{r}
+ggplot(precip, 
+       aes(x=location, 
+           y=prcp,
+           color=year)) + 
+  geom_point() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+# Vapor pressure deficit
+```{r}
+vpd = df %>% 
+  aggregate(vp ~ trial + location + year, data=., mean)
+```
+
+```{r}
+ggplot(vpd, 
+       aes(x=location, 
+           y=vp,
+           color=year)) + 
+  geom_point() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+
+# Combine and plot
+```{r}
+mergers = c('trial', 'location', 'year')
+pltdf = merge(gdd, insolation, by=mergers) %>% 
+  merge(precip, by=mergers) %>% 
+  merge(vpd, by=mergers) %>% 
+  pivot_longer(cols=c('gdd', 'radn', 'prcp', 'vp'))
+
+prettynames = c(gdd = 'Cumulative Growing<br>Degree Days [<sup>o</sup>C]',
+                radn = 'Mean Solar<br>Radiation [MJ m<sup>-2</sup> day<sup>-1</sup>]',
+                prcp = 'Cumulative<br>Precipitation [mm]',
+                vp = 'Mean Vapor<br>Pressure Deficit [kPa]')
+pltdf$name %<>% prettynames[.]
+
+
+pltdf$location %<>% 
+  gsub('_', ' ', .) %>% 
+  toTitleCase %>% 
+  factor(., 
+         levels=sort(unique(.), 
+                     decreasing=TRUE)
+  )
+```
+
+```{r fig.height=3, fig.width=6.5}
+weatherplt = 
+  ggplot(pltdf,
+         aes(y=location,
+             x=value,
+             color=factor(year))) +
+  scale_color_manual(values=c('#222222', '#888888')) +
+  facet_wrap(~name, scales='free_x', nrow=1) +
+  # scale_y_reverse() +
+  geom_point(size=1) +
+  labs(x=NULL, y=NULL) +
+  theme_minimal() +
+  labs(color=NULL) +
+  theme(panel.grid=element_line(size=0.1),
+        text=element_text(size=8), 
+        axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        strip.text=element_markdown(),
+        legend.position='bottom',
+        legend.box.spacing=unit(-0.1, 'cm'))
+weatherplt
+```
+
+```{r}
+here(out_dir, 'Fig 1 - Weather.jpg') %>% 
+  ggsave(weatherplt,
+         width=6.5, 
+         height=3,
+         units='in')
+```
+
